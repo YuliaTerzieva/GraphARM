@@ -68,7 +68,7 @@ try:
 except:
     print ("No model to load")
 # train loop
-for epoch in range(2000):
+for epoch in range(2):#2000
     print(f"Epoch {epoch}")
     grapharm.train_step(
         train_batch=dataset[2*epoch*batch_size:(2*epoch + 1)*batch_size],
