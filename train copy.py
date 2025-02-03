@@ -1,20 +1,24 @@
 from torch_geometric.datasets import ZINC
+import torch_geometric as pyg
+from networkx import get_node_attributes
 from tqdm import tqdm
 import torch
 from torch import nn
 import math
 import wandb
 import os
+import pickle as pkl
 
 from models import DiffusionOrderingNetwork, DenoisingNetwork
 from utils import NodeMasking
 from grapharm import GraphARM
+from torch_geometric.loader import DataLoader
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('mps' if torch.cuda.is_available() else 'cpu')
 print(f"Using device {device}")
 
 # instanciate the dataset
-dataset = ZINC(root='./data/ZINC', transform=None, pre_transform=None)
+# dataset = ZINC(root='./data/ZINC', transform=None, pre_transform=None)
 
 
 ### For my understanding of the dataset here is what we are working with:
@@ -78,7 +82,30 @@ dataset = ZINC(root='./data/ZINC', transform=None, pre_transform=None)
          23, 16, 26, 27, 25, 13, 25, 11, 29, 30, 28, 28, 31,  8, 30, 32,  6, 31]])"""
 
 
-diff_ord_net = DiffusionOrderingNetwork(node_feature_dim=1,
+nx_graphs = pkl.load(open(f'data/Ego_Nets_conf3', 'rb'))
+
+# Create color mapping efficiently
+colors = {color for g in nx_graphs for color in get_node_attributes(g, 'color').values()}
+color_to_idx = {color: idx for idx, color in enumerate(colors)}
+
+
+### I nede to turn the networkx data into torch_geometric data objects
+pyg_graphs = []
+for n in nx_graphs:
+    """n.nodes[0] -> {'color': 'blue', 'anomaly': 0}"""
+    for node, attrs in n.nodes(data=True):
+        attrs['node_id'] = node  # Keep node ID
+        attrs['color'] = color_to_idx.get(attrs.get('color', 'unknown'), -1)  # Convert color to int
+
+    pyg_graphs.append(pyg.utils.from_networkx(n, group_node_attrs=['node_id', 'color']))
+
+# Print first graph for verification
+print(nx_graphs[0].nodes, nx_graphs[0].edges)
+print(pyg_graphs[0].x, pyg_graphs[0].edge_index)
+
+dataset = DataLoader(pyg_graphs, batch_size=32, shuffle=True)
+
+diff_ord_net = DiffusionOrderingNetwork(node_feature_dim=2,
                                         num_node_types=dataset.x.unique().shape[0],
                                         num_edge_types=dataset.edge_attr.unique().shape[0],
                                         num_layers=3,
