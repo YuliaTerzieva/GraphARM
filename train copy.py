@@ -1,5 +1,6 @@
 from torch_geometric.datasets import ZINC
 import torch_geometric as pyg
+from torch_geometric.data import Dataset, Data
 from networkx import get_node_attributes
 from tqdm import tqdm
 import torch
@@ -14,11 +15,12 @@ from utils import NodeMasking
 from grapharm import GraphARM
 from torch_geometric.loader import DataLoader
 
-device = torch.device('mps' if torch.cuda.is_available() else 'cpu')
+device = torch.device('mps' if torch.mps.is_available() else 'cpu')
 print(f"Using device {device}")
 
 # instanciate the dataset
 # dataset = ZINC(root='./data/ZINC', transform=None, pre_transform=None)
+# print(type(dataset)) # <class 'torch_geometric.datasets.zinc.ZINC'>
 
 
 ### For my understanding of the dataset here is what we are working with:
@@ -81,33 +83,76 @@ print(f"Using device {device}")
          17, 25, 16, 18, 23, 17, 19, 18, 20, 19, 21, 22, 20, 20, 23, 17, 22, 24,
          23, 16, 26, 27, 25, 13, 25, 11, 29, 30, 28, 28, 31,  8, 30, 32,  6, 31]])"""
 
+class CustomPyGDataset(Dataset):
+    def __init__(self, data_list):
+        super().__init__()
+        self.data_list = data_list  # Store PyG Data objects
+        
+        # Precompute and store global dataset attributes
+        self.x = self._compute_x()
+        self.edge_attr = self._compute_edge_attr()
 
-nx_graphs = pkl.load(open(f'data/Ego_Nets_conf3', 'rb'))
+    def len(self):
+        return len(self.data_list)  # Total number of graphs
 
-# Create color mapping efficiently
-colors = {color for g in nx_graphs for color in get_node_attributes(g, 'color').values()}
-color_to_idx = {color: idx for idx, color in enumerate(colors)}
+    def get(self, idx):
+        return self.data_list[idx]  # Retrieve graph by index
+
+    def _compute_x(self):
+        """Concatenates node features from all graphs into a single tensor."""
+        return torch.cat([data.x for data in self.data_list], dim=0)
+
+    def _compute_edge_attr(self):
+        """Concatenates edge attributes from all graphs into a single tensor, if they exist."""
+        if all(hasattr(data, 'edge_attr') and data.edge_attr is not None for data in self.data_list):
+            return torch.cat([data.edge_attr for data in self.data_list], dim=0)
+        return None  # Edge attributes do not exist
 
 
-### I nede to turn the networkx data into torch_geometric data objects
-pyg_graphs = []
-for n in nx_graphs:
-    """n.nodes[0] -> {'color': 'blue', 'anomaly': 0}"""
-    for node, attrs in n.nodes(data=True):
-        attrs['node_id'] = node  # Keep node ID
-        attrs['color'] = color_to_idx.get(attrs.get('color', 'unknown'), -1)  # Convert color to int
+def load_dataset_from_pickle(filename = 'data/Ego_Nets_conf3', batch_size = 32):
+    """
+    This function loads a custom dataset from a pickle, which has a list of networkx graphs
+    The custom graphs have attribute node id and color
+    The function then transforms the list of torch_geometric.data.data.Data objects into a custom dataset object
+    which is then returned. 
+    """
 
-    pyg_graphs.append(pyg.utils.from_networkx(n, group_node_attrs=['node_id', 'color']))
+    nx_graphs = pkl.load(open(filename, 'rb'))
 
-# Print first graph for verification
-print(nx_graphs[0].nodes, nx_graphs[0].edges)
-print(pyg_graphs[0].x, pyg_graphs[0].edge_index)
+    # Create color mapping efficiently
+    colors = {color for g in nx_graphs for color in get_node_attributes(g, 'color').values()}
+    color_to_idx = {color: idx for idx, color in enumerate(colors)}
 
-dataset = DataLoader(pyg_graphs, batch_size=32, shuffle=True)
 
-diff_ord_net = DiffusionOrderingNetwork(node_feature_dim=2,
+    ### I nede to turn the networkx data into torch_geometric data objects
+    pyg_graphs = [] # this would be a list of torch_geometric.data.data.Data objects
+    for n in nx_graphs:
+        """n.nodes[0] -> {'color': 'blue', 'anomaly': 0}"""
+        for node, attrs in n.nodes(data=True):
+            attrs['node_id'] = node  # Keep node ID
+            attrs['color'] = color_to_idx.get(attrs.get('color', 'unknown'), -1)  # Convert color to int
+
+        pyg_graphs.append(pyg.utils.from_networkx(n, group_node_attrs=['node_id', 'color']))
+
+    # Print first graph for verification
+    print(nx_graphs[0].nodes, nx_graphs[0].edges)
+    print(pyg_graphs[0].x, pyg_graphs[0].edge_index)
+
+    # Wrap pyg_graphs into a Dataset
+    pyg_dataset = CustomPyGDataset(pyg_graphs)
+
+    # Use the dataset in DataLoader
+    dataset = DataLoader(pyg_dataset, batch_size=batch_size, shuffle=True).dataset
+
+    return dataset
+
+
+my_dataset = load_dataset_from_pickle()
+dataset = my_dataset
+
+diff_ord_net = DiffusionOrderingNetwork(node_feature_dim=1,
                                         num_node_types=dataset.x.unique().shape[0],
-                                        num_edge_types=dataset.edge_attr.unique().shape[0],
+                                        num_edge_types=0, #dataset.edge_attr.unique().shape[0],
                                         num_layers=3,
                                         out_channels=1,
                                         device=device)
